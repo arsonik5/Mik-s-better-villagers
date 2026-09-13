@@ -1,0 +1,42 @@
+# gradle
+.gradle/
+build/
+out/
+classes/
+
+# eclipse
+*.launch
+
+# idea
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# vscode
+.vscode/
+.settings/
+bin/
+.classpath
+.project
+
+# fabric
+run/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+
+# Local model binaries/weights - never commit large native/model assets
+*.gguf
+*.exe
+llama-server
+llama-server.exe
+
+# Claude Code local session state / dev-run logs
+.claude/
+run_client_out.log
+run_client_err.log
+

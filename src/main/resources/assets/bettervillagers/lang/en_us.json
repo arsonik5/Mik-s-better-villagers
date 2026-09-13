@@ -1,0 +1,8 @@
+{
+  "bettervillagers.gui.tab.talk": "Talk",
+  "bettervillagers.gui.tab.trade": "Trade",
+  "bettervillagers.gui.chat.placeholder": "Say something...",
+  "bettervillagers.gui.chat.thinking": "...",
+  "bettervillagers.status.starting": "The villager is gathering their thoughts...",
+  "bettervillagers.status.unavailable": "This villager doesn't feel like talking right now."
+}
