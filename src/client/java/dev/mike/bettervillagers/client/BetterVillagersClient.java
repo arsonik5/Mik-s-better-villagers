@@ -5,6 +5,7 @@ import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.gui.screens.MenuScreens;
 
 import dev.mike.bettervillagers.client.gui.VillagerTalkScreen;
+import dev.mike.bettervillagers.net.VillagerChatS2C;
 import dev.mike.bettervillagers.net.VillagerOffersS2C;
 import dev.mike.bettervillagers.screen.VillagerTalkMenu;
 
@@ -20,6 +21,14 @@ public class BetterVillagersClient implements ClientModInitializer {
                     if (context.player().containerMenu instanceof VillagerTalkMenu menu
                             && menu.getVillagerEntityId() == payload.villagerEntityId()) {
                         menu.setOffers(payload.offers());
+                    }
+                }));
+
+        ClientPlayNetworking.registerGlobalReceiver(VillagerChatS2C.TYPE, (payload, context) ->
+                context.client().execute(() -> {
+                    VillagerTalkScreen screen = VillagerTalkScreen.current();
+                    if (screen != null) {
+                        screen.onReply(payload.reply());
                     }
                 }));
     }

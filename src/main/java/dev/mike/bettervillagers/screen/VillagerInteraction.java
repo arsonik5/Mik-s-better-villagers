@@ -8,11 +8,14 @@ import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 
+import dev.mike.bettervillagers.util.VillagerNaming;
+
 public final class VillagerInteraction {
     private VillagerInteraction() {
     }
 
     public static void open(ServerPlayer player, Villager villager) {
+        VillagerNaming.ensureNamed(villager);
         villager.setTradingPlayer(player);
         int villagerEntityId = villager.getId();
 

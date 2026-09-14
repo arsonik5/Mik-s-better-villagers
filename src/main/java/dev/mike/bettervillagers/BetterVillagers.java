@@ -1,6 +1,7 @@
 package dev.mike.bettervillagers;
 
 import net.fabricmc.api.ModInitializer;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.player.UseEntityCallback;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.InteractionHand;
@@ -9,6 +10,7 @@ import net.minecraft.world.entity.npc.villager.Villager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import dev.mike.bettervillagers.llm.LlamaServerProcess;
 import dev.mike.bettervillagers.screen.VillagerInteraction;
 
 public class BetterVillagers implements ModInitializer {
@@ -18,6 +20,9 @@ public class BetterVillagers implements ModInitializer {
     @Override
     public void onInitialize() {
         ModRegistry.register();
+
+        ServerLifecycleEvents.SERVER_STARTING.register(server -> LlamaServerProcess.instance().startAsync());
+        ServerLifecycleEvents.SERVER_STOPPING.register(server -> LlamaServerProcess.instance().stop());
 
         UseEntityCallback.EVENT.register((player, world, hand, entity, hitResult) -> {
             if (world.isClientSide()) {

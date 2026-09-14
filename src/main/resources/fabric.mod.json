@@ -10,12 +10,14 @@
   "environment": "*",
   "entrypoints": {
     "main": ["dev.mike.bettervillagers.BetterVillagers"],
-    "client": ["dev.mike.bettervillagers.client.BetterVillagersClient"]
+    "client": ["dev.mike.bettervillagers.client.BetterVillagersClient"],
+    "modmenu": ["dev.mike.bettervillagers.client.BetterVillagersModMenu"]
   },
   "depends": {
     "fabricloader": ">=0.19.5",
     "minecraft": "~26.2",
     "java": ">=25",
-    "fabric-api": "*"
+    "fabric-api": "*",
+    "modmenu": "*"
   }
 }

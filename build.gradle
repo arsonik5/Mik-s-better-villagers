@@ -17,6 +17,7 @@ repositories {
     // See https://docs.gradle.org/current/userguide/declaring_repositories.html for more information about repositories.
     maven { url 'https://maven.wispforest.io' }
     maven { url 'https://jitpack.io' }
+    maven { url 'https://maven.terraformersmc.com/releases' }
 }
 
 loom {
@@ -40,6 +41,9 @@ dependencies {
 
     // owo-lib: declarative UI framework used for the villager talk/trade screen.
     implementation "io.wispforest:owo-lib:${project.owo_version}"
+
+    // ModMenu: gives the mod a real settings screen from the Mods list.
+    implementation "com.terraformersmc:modmenu:${project.modmenu_version}"
 }
 
 java {

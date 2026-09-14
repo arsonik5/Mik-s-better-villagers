@@ -11,6 +11,14 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.trading.MerchantOffer;
 import net.minecraft.world.item.trading.MerchantOffers;
 
+import dev.mike.bettervillagers.brain.BrainStore;
+import dev.mike.bettervillagers.brain.VillagerBrain;
+import dev.mike.bettervillagers.config.ModConfig;
+import dev.mike.bettervillagers.llm.LlamaClient;
+import dev.mike.bettervillagers.llm.LlamaServerProcess;
+import dev.mike.bettervillagers.llm.PromptBuilder;
+import dev.mike.bettervillagers.net.VillagerChatC2S;
+import dev.mike.bettervillagers.net.VillagerChatS2C;
 import dev.mike.bettervillagers.net.VillagerOffersS2C;
 import dev.mike.bettervillagers.net.VillagerTradeC2S;
 import dev.mike.bettervillagers.screen.VillagerTalkMenu;
@@ -24,11 +32,55 @@ public final class ModRegistry {
 
         PayloadTypeRegistry.serverboundPlay().register(VillagerTradeC2S.TYPE, VillagerTradeC2S.STREAM_CODEC);
         PayloadTypeRegistry.clientboundPlay().register(VillagerOffersS2C.TYPE, VillagerOffersS2C.STREAM_CODEC);
+        PayloadTypeRegistry.serverboundPlay().register(VillagerChatC2S.TYPE, VillagerChatC2S.STREAM_CODEC);
+        PayloadTypeRegistry.clientboundPlay().register(VillagerChatS2C.TYPE, VillagerChatS2C.STREAM_CODEC);
 
         ServerPlayNetworking.registerGlobalReceiver(VillagerTradeC2S.TYPE, (payload, context) -> {
             ServerPlayer player = context.player();
             context.server().execute(() -> executeTrade(player, payload.villagerEntityId(), payload.offerIndex()));
         });
+
+        ServerPlayNetworking.registerGlobalReceiver(VillagerChatC2S.TYPE, (payload, context) -> {
+            ServerPlayer player = context.player();
+            context.server().execute(() -> handleChat(player, payload.villagerEntityId(), payload.message()));
+        });
+    }
+
+    private static void handleChat(ServerPlayer player, int villagerEntityId, String message) {
+        if (!(player.level() instanceof ServerLevel level)) {
+            return;
+        }
+        if (!(level.getEntity(villagerEntityId) instanceof Villager villager)) {
+            return;
+        }
+        if (!(player.containerMenu instanceof VillagerTalkMenu menu) || menu.getVillagerEntityId() != villagerEntityId) {
+            return;
+        }
+
+        LlamaServerProcess llm = LlamaServerProcess.instance();
+        if (llm.state() != LlamaServerProcess.State.READY) {
+            ServerPlayNetworking.send(player, new VillagerChatS2C(villagerEntityId,
+                    "(" + villager.getDisplayName().getString() + " doesn't seem to be listening right now.)"));
+            return;
+        }
+
+        VillagerBrain brain = BrainStore.get(villager.getUUID());
+        brain.addTurn(true, message);
+        var prompt = PromptBuilder.build(villager, brain, message);
+
+        ModConfig config = ModConfig.get();
+        LlamaClient.chat(llm.port(), prompt, config.maxTokens, config.temperature, config.requestTimeoutSeconds)
+                .whenComplete((result, error) -> level.getServer().execute(() -> {
+                    String text;
+                    if (error != null) {
+                        text = "(...trails off, distracted by something.)";
+                    } else {
+                        text = result.text();
+                        llm.recordTokensPerSecond(result.tokensPerSecond());
+                    }
+                    brain.addTurn(false, text);
+                    ServerPlayNetworking.send(player, new VillagerChatS2C(villagerEntityId, text));
+                }));
     }
 
     private static void executeTrade(ServerPlayer player, int villagerEntityId, int offerIndex) {

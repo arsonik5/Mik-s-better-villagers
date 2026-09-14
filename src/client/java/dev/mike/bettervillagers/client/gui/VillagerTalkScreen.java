@@ -16,11 +16,13 @@ import io.wispforest.owo.ui.core.Sizing;
 import io.wispforest.owo.ui.core.Surface;
 import io.wispforest.owo.ui.core.VerticalAlignment;
 
+import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
 import net.minecraft.client.gui.GuiGraphicsExtractor;
 import net.minecraft.client.input.KeyEvent;
 import net.minecraft.network.chat.Component;
 import net.minecraft.world.entity.player.Inventory;
 
+import dev.mike.bettervillagers.net.VillagerChatC2S;
 import dev.mike.bettervillagers.screen.VillagerTalkMenu;
 
 /**
@@ -34,6 +36,7 @@ public class VillagerTalkScreen extends BaseOwoContainerScreen<FlowLayout, Villa
     private static final int GLFW_KEY_ENTER = 257;
     private static final int GLFW_KEY_ESCAPE = 256;
     private static final int MAX_VISIBLE_LINES = 5;
+    private static final int MAX_MESSAGE_LENGTH = 2000;
 
     private static final int COLOR_NAME = 0xFFFFFFFF;
     private static final int COLOR_LINE_LATEST = 0xFFE0E0E0;
@@ -50,6 +53,7 @@ public class VillagerTalkScreen extends BaseOwoContainerScreen<FlowLayout, Villa
     private FlowLayout lines;
     private FlowLayout dialogueBar;
     private TextBoxComponent chatInput;
+    private int pendingReplyIndex = -1;
 
     public VillagerTalkScreen(VillagerTalkMenu menu, Inventory inventory, Component title) {
         super(menu, inventory, title);
@@ -84,7 +88,10 @@ public class VillagerTalkScreen extends BaseOwoContainerScreen<FlowLayout, Villa
             if (input.key() == GLFW_KEY_ESCAPE) {
                 return super.keyPressed(input);
             }
-            this.chatInput.keyPressed(input);
+            // onKeyPress (not keyPressed!) is the real entry point — it both
+            // handles the widget's own editing AND fires the keyPress()
+            // event stream our Enter-to-submit subscription relies on.
+            this.chatInput.onKeyPress(input);
             return true;
         }
         return super.keyPressed(input);
@@ -115,6 +122,7 @@ public class VillagerTalkScreen extends BaseOwoContainerScreen<FlowLayout, Villa
 
         this.chatInput = UIComponents.textBox(Sizing.fill(100));
         this.chatInput.setBordered(false);
+        this.chatInput.setMaxLength(MAX_MESSAGE_LENGTH);
         this.chatInput.keyPress().subscribe(input -> {
             if (input.key() == GLFW_KEY_ENTER) {
                 submitChatMessage();
@@ -136,11 +144,23 @@ public class VillagerTalkScreen extends BaseOwoContainerScreen<FlowLayout, Villa
 
     private void submitChatMessage() {
         String message = this.chatInput.getValue().trim();
-        if (!message.isEmpty()) {
-            this.chatEntries.add(new ChatEntry(true, message));
-            // Phase 3 will replace this with a real request to the local LLM.
-            this.chatEntries.add(new ChatEntry(false, "(...)"));
-            this.chatInput.text("");
+        if (message.isEmpty()) {
+            return;
+        }
+        this.chatEntries.add(new ChatEntry(true, message));
+        this.chatEntries.add(new ChatEntry(false, "..."));
+        this.pendingReplyIndex = this.chatEntries.size() - 1;
+        this.chatInput.text("");
+        rebuildLines();
+
+        ClientPlayNetworking.send(new VillagerChatC2S(this.menu.getVillagerEntityId(), message));
+    }
+
+    /** Called by the client network handler when the server's reply arrives. */
+    public void onReply(String reply) {
+        if (this.pendingReplyIndex >= 0 && this.pendingReplyIndex < this.chatEntries.size()) {
+            this.chatEntries.set(this.pendingReplyIndex, new ChatEntry(false, reply));
+            this.pendingReplyIndex = -1;
             rebuildLines();
         }
     }
