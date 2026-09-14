@@ -7,6 +7,7 @@ import io.wispforest.owo.ui.base.BaseOwoContainerScreen;
 import io.wispforest.owo.ui.component.TextBoxComponent;
 import io.wispforest.owo.ui.component.UIComponents;
 import io.wispforest.owo.ui.container.FlowLayout;
+import io.wispforest.owo.ui.container.ScrollContainer;
 import io.wispforest.owo.ui.container.UIContainers;
 import io.wispforest.owo.ui.core.Color;
 import io.wispforest.owo.ui.core.HorizontalAlignment;
@@ -27,36 +28,38 @@ import dev.mike.bettervillagers.screen.VillagerTalkMenu;
 
 /**
  * A Skyrim-style dialogue bar anchored to the bottom of the screen instead
- * of a floating GUI window: villager name, a short scrollback of recent
- * lines fading toward the top, and a borderless input line. No vanilla
- * trades are shown here — trade offers only ever come from a negotiated
- * conversation (Phase 4), never villager.getOffers().
+ * of a floating GUI window: villager name, a scrollable transcript over a
+ * gently blurred backdrop, and a borderless input line. No vanilla trades
+ * are shown here — trade offers only ever come from a negotiated
+ * conversation (Phase 4), never villager.getOffers(). The transcript
+ * persists across closing/reopening the same villager for the session (see
+ * ClientChatHistoryStore).
  */
 public class VillagerTalkScreen extends BaseOwoContainerScreen<FlowLayout, VillagerTalkMenu> {
     private static final int GLFW_KEY_ENTER = 257;
     private static final int GLFW_KEY_ESCAPE = 256;
-    private static final int MAX_VISIBLE_LINES = 5;
     private static final int MAX_MESSAGE_LENGTH = 2000;
+    private static final int LINES_HEIGHT = 150;
 
     private static final int COLOR_NAME = 0xFFFFFFFF;
     private static final int COLOR_LINE_LATEST = 0xFFE0E0E0;
-    private static final int COLOR_LINE_OLD = 0xFF808080;
+    private static final int COLOR_LINE_OLD = 0xFFA6A6AC;
     private static final int COLOR_PLAYER_LINE = 0xFFAAAAAA;
     private static final int COLOR_INPUT_UNDERLINE = 0xFF555555;
+    private static final int COLOR_BACKDROP = 0x50000000;
 
     private static VillagerTalkScreen current;
 
-    private record ChatEntry(boolean fromPlayer, String text) {
-    }
-
-    private final List<ChatEntry> chatEntries = new ArrayList<>();
+    private final List<ClientChatHistoryStore.Entry> chatEntries;
     private FlowLayout lines;
+    private ScrollContainer<FlowLayout> linesScroll;
     private FlowLayout dialogueBar;
     private TextBoxComponent chatInput;
     private int pendingReplyIndex = -1;
 
     public VillagerTalkScreen(VillagerTalkMenu menu, Inventory inventory, Component title) {
         super(menu, inventory, title);
+        this.chatEntries = ClientChatHistoryStore.get(menu.getVillagerEntityId());
         current = this;
     }
 
@@ -109,7 +112,7 @@ public class VillagerTalkScreen extends BaseOwoContainerScreen<FlowLayout, Villa
         root.verticalAlignment(VerticalAlignment.BOTTOM);
 
         this.dialogueBar = UIContainers.verticalFlow(Sizing.fill(42), Sizing.content());
-        this.dialogueBar.surface(Surface.BLANK);
+        this.dialogueBar.surface(Surface.blur(4, 8).and(Surface.flat(COLOR_BACKDROP)));
         this.dialogueBar.padding(Insets.of(14));
         this.dialogueBar.gap(2);
 
@@ -117,7 +120,8 @@ public class VillagerTalkScreen extends BaseOwoContainerScreen<FlowLayout, Villa
 
         this.lines = UIContainers.verticalFlow(Sizing.fill(100), Sizing.content());
         this.lines.gap(2);
-        this.dialogueBar.child(this.lines);
+        this.linesScroll = UIContainers.verticalScroll(Sizing.fill(100), Sizing.fixed(LINES_HEIGHT), this.lines);
+        this.dialogueBar.child(this.linesScroll);
         rebuildLines();
 
         this.chatInput = UIComponents.textBox(Sizing.fill(100));
@@ -147,8 +151,8 @@ public class VillagerTalkScreen extends BaseOwoContainerScreen<FlowLayout, Villa
         if (message.isEmpty()) {
             return;
         }
-        this.chatEntries.add(new ChatEntry(true, message));
-        this.chatEntries.add(new ChatEntry(false, "..."));
+        this.chatEntries.add(new ClientChatHistoryStore.Entry(true, message));
+        this.chatEntries.add(new ClientChatHistoryStore.Entry(false, "..."));
         this.pendingReplyIndex = this.chatEntries.size() - 1;
         this.chatInput.text("");
         rebuildLines();
@@ -159,7 +163,7 @@ public class VillagerTalkScreen extends BaseOwoContainerScreen<FlowLayout, Villa
     /** Called by the client network handler when the server's reply arrives. */
     public void onReply(String reply) {
         if (this.pendingReplyIndex >= 0 && this.pendingReplyIndex < this.chatEntries.size()) {
-            this.chatEntries.set(this.pendingReplyIndex, new ChatEntry(false, reply));
+            this.chatEntries.set(this.pendingReplyIndex, new ClientChatHistoryStore.Entry(false, reply));
             this.pendingReplyIndex = -1;
             rebuildLines();
         }
@@ -167,15 +171,18 @@ public class VillagerTalkScreen extends BaseOwoContainerScreen<FlowLayout, Villa
 
     private void rebuildLines() {
         this.lines.clearChildren();
-        int start = Math.max(0, this.chatEntries.size() - MAX_VISIBLE_LINES);
-        for (int i = start; i < this.chatEntries.size(); i++) {
-            ChatEntry entry = this.chatEntries.get(i);
-            boolean latest = i == this.chatEntries.size() - 1;
+        List<ClientChatHistoryStore.Entry> snapshot = new ArrayList<>(this.chatEntries);
+        for (int i = 0; i < snapshot.size(); i++) {
+            ClientChatHistoryStore.Entry entry = snapshot.get(i);
+            boolean latest = i == snapshot.size() - 1;
             int color = entry.fromPlayer() ? COLOR_PLAYER_LINE : (latest ? COLOR_LINE_LATEST : COLOR_LINE_OLD);
             String prefix = entry.fromPlayer() ? "You: " : "";
             this.lines.child(UIComponents.label(Component.literal(prefix + entry.text()))
                     .color(Color.ofRgb(color))
                     .maxWidth(400));
+        }
+        if (this.linesScroll != null) {
+            this.linesScroll.scrollTo(1.0);
         }
     }
 }

@@ -1,39 +1,46 @@
 # LLM integration plan
 
-Status: **planned, not implemented.** This is the design for the next block of work: wiring a real local LLM behind the dialogue bar, giving it tools to actually act on the world (propose trades, remember things, gesture), and feeding it memory from the SQLite database (see `memory-database.md`).
+Status: **basic chat is implemented and working (build-order steps 1–2 below); memory injection, the structured action schema, and tool-calling are still planned, not implemented.** See `architecture.md`'s "LLM integration" section for what actually exists today. This doc is the design for the rest of it: SQLite memory (`memory-database.md`), the `say` + `actions` response schema, and giving the model real (guardrailed) ways to act on the world.
 
 ## Goals and constraints
 
 - Runs locally on the player's own GPU, alongside the game, on a **2–4B class model**. Latency budget: first token under ~400ms, a full reply under ~2s. This shapes almost every decision below (short prompts, no multi-round tool-call loops, aggressive KV-cache prefix reuse).
 - The model is never trusted to directly mutate game state. Every action it proposes goes through the same validate-then-apply pipeline already built for trade execution (`ModRegistry.executeTrade`) — see "Tool-call action schema" below.
 - Chat, trades, memory, and (later) gestures all come from **one conversation turn**, not a back-and-forth agentic loop calling tools and re-prompting the model. A single structured response per turn is what the latency budget allows.
+- **The whole orchestration layer (memory DB, prompt building, action parsing/validation) is Java, not Python.** This was explicitly considered and rejected: a Python layer would mean either requiring players to have Python installed (breaks the zero-dependency goal — see `architecture.md`) or bundling a second portable runtime alongside llama-server (real extra packaging/lifecycle work for no new capability, since Java already does SQLite via JDBC, JSON via GSON, and HTTP just as well, in the same process, with lower latency than a second process hop).
 
 ## Process lifecycle: bundled `llama-server`
 
 The mod bundles and manages its own `llama-server` (llama.cpp's HTTP server binary) as a subprocess — it does not talk to the user's separate LM Studio setup, and does not require the player to run anything themselves.
 
-- **Binary**: resolved on first run in this order — (1) an explicit `llamaServerPath` config override, (2) an already-present binary under `<gameDir>/bettervillagers/bin/<os>-<arch>/`, sha256-checked against a bundled manifest, (3) a first-run download of a pinned llama.cpp release asset over HTTPS, verified against that manifest, unpacked, and marked executable on non-Windows. Never bundle a CUDA build inside the mod jar itself (100s of MB) — it's a separate download, with a progress toast; the mod stays fully playable (chat/trades degraded, everything else normal) while it happens.
-- **Model**: same pattern — a small instruct GGUF (2–4B, Q4_K_M ballpark), path/URL/sha256 in config, never bundled in the jar. If no model is configured or the file is missing, degrade cleanly: no chat, a clear in-dialogue message, never a crash.
-- **Launch**: `LlamaServerProcess` (singleton, server-side only — this must never exist in `src/client`), started on `ServerLifecycleEvents.SERVER_STARTING`, stopped on `SERVER_STOPPING` plus a JVM shutdown hook as backstop. Binds an ephemeral local port (`new ServerSocket(0)` probe-then-release) so it never collides with anything else the user has running (like their own LM Studio on 1234). `--host 127.0.0.1` only.
-- **Health**: poll `GET /health` until ready (states `STARTING → READY → DEGRADED → STOPPED`); every request short-circuits to a fallback while not `READY`.
-- **Draining stdout/stderr on a dedicated daemon thread is mandatory** — an undrained pipe will deadlock the child process.
+- **Binary** (implemented, `NativeAssets`): resolved on first run in this order — (1) an explicit `llamaServerPath` config override, (2) an already-present binary anywhere under `<gameDir>/bettervillagers/bin/` (found by walking the tree for the executable name, not a hardcoded path — see `decisions-log.md`), (3) a first-run download of a pinned llama.cpp release (the Vulkan-accelerated build, for broad GPU-vendor compatibility) from GitHub, extracted, executable bit set on non-Windows. **Not yet implemented from the original plan**: sha256 verification against a manifest — currently any successful download is trusted as-is. The mod stays fully playable (chat degraded, everything else normal) while downloading.
+- **Model** (implemented, `ModelAssets`): same pattern, via `ModConfig.modelPath` (local file override) or `modelDownloadUrl` (auto-download, filename derived from the URL). No sha256 verification here either, same caveat as the binary. Download progress is published to `ModelDownloadState` for the settings screen. If no model resolves, degrades cleanly — no chat, a clear in-dialogue message ("doesn't seem to be listening"/"still gathering their thoughts"), never a crash.
+- **Launch** (implemented, `LlamaServerProcess`): singleton, server-side only, started on `ServerLifecycleEvents.SERVER_STARTING`, stopped on `SERVER_STOPPING`. Binds an ephemeral local port (`new ServerSocket(0)` probe-then-release) so it never collides with anything else running locally (LM Studio, Ollama, ...). `--host 127.0.0.1` only. **Not yet implemented**: a JVM shutdown hook as a backstop beyond the lifecycle event (low risk today, worth adding before shipping).
+- **Health** (implemented): polls `GET /health` until ready (`STARTING → READY → DEGRADED → STOPPED`); every request short-circuits to a fallback while not `READY`.
+- **Draining stdout on a dedicated daemon thread** (implemented) — mandatory, an undrained pipe deadlocks the child process.
 
 ## Async request path
 
-One shared `java.net.http.HttpClient` on a small dedicated executor. Every call is async; results only ever touch game state via `server.execute(...)` — the server (or client) thread must never block on an HTTP round trip.
+**Implemented**: one shared `java.net.http.HttpClient` (`LlamaClient`) on a small dedicated executor; results only touch game state via `server.execute(...)`.
 
-A `RequestGovernor` enforces: a global semaphore matching llama-server's `--parallel` slot count, one in-flight request per villager (a new request for the same villager replaces the queued one, never queues both), and priority ordering — an open dialogue's chat request always outranks an ambient/idle-line request (see below).
+**Not yet implemented**: the `RequestGovernor` described below. Right now a second chat request while one is already in flight for the same villager is *not* deduplicated or queued — it would just fire a second concurrent HTTP call. Fine for a single player having one conversation at a time (today's only real usage pattern) but worth building before ambient bubbles or multiplayer make concurrent requests per villager actually happen:
+
+A `RequestGovernor` should enforce: a global semaphore matching llama-server's `--parallel` slot count, one in-flight request per villager (a new request for the same villager replaces the queued one, never queues both), and priority ordering — an open dialogue's chat request always outranks an ambient/idle-line request (see below).
 
 ## Prompt structure
 
-Ordered most-stable → least-stable, so llama-server's `--cache-reuse` actually hits the KV cache on turn 2+ of a conversation:
+Ordered most-stable → least-stable, so llama-server's KV cache actually gets reused turn-to-turn (note: `--cache-reuse` / `--cont-batching` flags are set on launch, but prefix-reuse hit rate hasn't been explicitly measured yet — worth verifying once memory injection makes prompts more complex).
 
-1. **System prompt** — identical, byte-for-byte, across every villager. States the rules: you are a Minecraft villager, reply in 1–2 short sentences, stay in character, never mention being an AI, never invent items that don't exist, and — critically — describes the exact JSON response shape (see below) and the fixed vocabulary of allowed action types.
-2. **Persona** — per-villager, stable for its lifetime: name, profession, a couple of personality traits seeded deterministically from the villager's UUID (so the same villager is the same person across restarts, at zero storage cost beyond the UUID itself).
+**Implemented** (`PromptBuilder`): system prompt (fixed, identical across villagers) → persona line (name from `VillagerNaming`, profession, one trait picked deterministically from the villager's UUID) → recent history from `VillagerBrain` (in-memory only, capped at 6 turns, lost on server restart) → the new message.
+
+**Not yet implemented** — the rest of this section is still the plan:
+
+1. ~~System prompt~~ *(done, see above — though it doesn't yet describe a JSON response shape/action vocabulary, since that schema isn't built yet either)*.
+2. ~~Persona~~ *(done, see above)*.
 3. **Memory context** — assembled from SQLite (see `memory-database.md`): the villager's own rolling summary + a handful of recent personal facts, a couple of relevant village-scoped rumors, and rarely (only for genuinely major world events) a world-scoped fact. Kept to a hard token budget — this is a summarized/curated *injection*, not a raw dump of every row.
 4. **Live context frame** — compact `key=value` lines, not prose: time of day, weather, raid active y/n, player reputation (from vanilla's own `VillagerGossips`/`GossipType`), the player's held item, a short filtered/whitelisted slice of their inventory (never all 36 slots), distance from the villager's home.
-5. **History** — last ~3 turns verbatim; beyond that, a single rolling summary the model itself produces lazily in the background once history gets long, stored back into the villager's SQLite row.
-6. **The player's new message** — length-capped client-side (already enforced: `EditBox.setMaxLength(160)`) and re-validated server-side.
+5. **History beyond ~3 turns** — a single rolling summary the model itself produces lazily in the background once history gets long, stored back into the villager's SQLite row (today: just a hard cap at 6 in-memory turns, no summarization).
+6. **Message length limit** — client-side is currently a generous `2000` chars (`VillagerTalkScreen`/`ModSettingsScreen`, raised from an earlier `160` that was too restrictive for actual conversation); server-side re-validation of length isn't explicit yet beyond the network codec's own cap.
 
 ## Response shape and the tool-call action schema
 
@@ -68,9 +75,11 @@ Speech-bubble-style ambient lines (villagers occasionally saying something while
 
 ## Build order for this milestone
 
-1. `LlamaServerProcess` + health-check + shutdown lifecycle. Verify: boots, degrades cleanly with no model configured, no orphaned process after quitting the game (check Task Manager).
-2. `LlamaClient` + `PromptBuilder` (system + persona + live context frame + history, no memory injection yet) + wire the dialogue bar's "You: ..." submit into a real request instead of the current `"(...)"` placeholder echo. Verify: a real streamed reply appears in the dialogue bar.
-3. The SQLite memory layer (`memory-database.md`) + inject it into step 2's prompt. Verify: say something memorable, close the game, reopen, the villager still "remembers" it.
+1. ✅ `LlamaServerProcess` + health-check + shutdown lifecycle. Verified: boots, downloads binary+model on first run, degrades cleanly when not ready.
+2. ✅ `LlamaClient` + `PromptBuilder` (system + persona + history, no memory injection yet) + real chat over the network (`VillagerChatC2S`/`S2C`) replacing the earlier `"(...)"` placeholder echo. Verified: a real model reply appears in the dialogue bar. *(Not streamed — non-streaming `/v1/chat/completions`, since the "..." placeholder swap already hides the latency reasonably well; revisit if replies feel slow once memory injection adds prompt overhead.)*
+3. **Next**: the SQLite memory layer (`memory-database.md`) + inject it into step 2's prompt. Verify: say something memorable, close the game, reopen, the villager still "remembers" it.
 4. The grammar-constrained JSON response shape + `TradeValidator` + wiring `propose_trade` back into `VillagerOffersS2C`/`VillagerTradeC2S`. Verify: negotiate a trade in conversation, see it appear, execute it, confirm a hostile/malformed proposal (fixture-tested) never reaches the player as a real offer.
 5. `remember` / `gossip` actions writing to SQLite. Verify with the adversarial fixtures from step 4's validator, generalized.
 6. `gesture` as the first "controls the villager" action, client-visible.
+
+**Also picked up along the way, not originally in this list**: `ModConfig` (persisted settings), `VillagerNaming` (real persistent names instead of generic profession labels), and `ModSettingsScreen` (a full in-game settings UI — LLM status, tokens/sec, GPU/context/thread/temperature controls, a Hugging Face model search/browse/download flow, and a local model manager with delete/switch) — originally deferred to "a future ModMenu integration," built now instead since it was needed to actually pick/swap models without hand-editing JSON. See `architecture.md`.

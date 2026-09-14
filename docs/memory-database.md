@@ -1,6 +1,6 @@
 # Memory database
 
-Status: **planned, not implemented.**
+Status: **planned, not implemented.** This is the next concrete build step (see `llm-integration.md`'s build order, step 3) — chat itself already works end-to-end without it (in-memory-only history via `VillagerBrain`), but nothing persists across a server restart yet, and there's no village/world-scoped context at all. Confirmed staying in Java, not Python, for this layer (`architecture.md`).
 
 ## One file per world, three logical scopes
 

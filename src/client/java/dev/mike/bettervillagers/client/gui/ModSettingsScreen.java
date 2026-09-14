@@ -1,6 +1,12 @@
 package dev.mike.bettervillagers.client.gui;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Comparator;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Stream;
 
 import io.wispforest.owo.ui.base.BaseOwoScreen;
 import io.wispforest.owo.ui.component.ButtonComponent;
@@ -10,40 +16,52 @@ import io.wispforest.owo.ui.component.UIComponents;
 import io.wispforest.owo.ui.container.FlowLayout;
 import io.wispforest.owo.ui.container.UIContainers;
 import io.wispforest.owo.ui.core.Color;
+import io.wispforest.owo.ui.core.HorizontalAlignment;
 import io.wispforest.owo.ui.core.Insets;
 import io.wispforest.owo.ui.core.OwoUIAdapter;
 import io.wispforest.owo.ui.core.Sizing;
 import io.wispforest.owo.ui.core.Surface;
+import io.wispforest.owo.ui.core.VerticalAlignment;
 
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.network.chat.Component;
 
+import dev.mike.bettervillagers.client.model.HuggingFaceSearch;
 import dev.mike.bettervillagers.config.ModConfig;
 import dev.mike.bettervillagers.llm.LlamaServerProcess;
 import dev.mike.bettervillagers.llm.ModelAssets;
 import dev.mike.bettervillagers.llm.ModelDownloadState;
 
-/** Settings for the local LLM: which model to use, GPU/context settings, and live status. */
+/**
+ * Settings for the local LLM: a Hugging Face model browser + local model
+ * manager (LM-Studio-style), GPU/context settings, and live status.
+ */
 public class ModSettingsScreen extends BaseOwoScreen<FlowLayout> {
     private static final int COLOR_TEXT = 0xFFE0E0E0;
     private static final int COLOR_DIM = 0xFF9A9AA0;
     private static final int COLOR_READY = 0xFF6FCF6F;
     private static final int COLOR_STARTING = 0xFFE0C05A;
     private static final int COLOR_ERROR = 0xFFE05252;
-    private static final int COLOR_PANEL = 0xF0202225;
+    private static final int COLOR_ACCENT = 0xFF6FA8DC;
 
     private final Screen parent;
-    private TextBoxComponent modelUrlBox;
+
+    private TextBoxComponent searchBox;
+    private FlowLayout searchResults;
+    private FlowLayout filesForSelectedRepo;
+    private FlowLayout installedModels;
+    private LabelComponent activeModelLabel;
+
     private TextBoxComponent gpuLayersBox;
     private TextBoxComponent contextSizeBox;
     private TextBoxComponent threadsBox;
     private TextBoxComponent maxTokensBox;
     private TextBoxComponent temperatureBox;
+
     private LabelComponent statusLabel;
     private LabelComponent statsLabel;
     private LabelComponent downloadLabel;
-    private ButtonComponent downloadButton;
 
     public ModSettingsScreen(Screen parent) {
         super(Component.literal("Better Villagers Settings"));
@@ -59,55 +77,77 @@ public class ModSettingsScreen extends BaseOwoScreen<FlowLayout> {
     protected void build(FlowLayout root) {
         ModConfig config = ModConfig.get();
 
-        root.surface(Surface.flat(0xB0000000));
-        root.horizontalAlignment(io.wispforest.owo.ui.core.HorizontalAlignment.CENTER);
-        root.verticalAlignment(io.wispforest.owo.ui.core.VerticalAlignment.CENTER);
+        root.surface(Surface.flat(0xD0101014));
+        root.horizontalAlignment(HorizontalAlignment.CENTER);
+        root.verticalAlignment(VerticalAlignment.CENTER);
+        root.padding(Insets.of(20));
 
-        FlowLayout panel = UIContainers.verticalFlow(Sizing.fixed(420), Sizing.fixed(360));
-        panel.surface(Surface.flat(COLOR_PANEL));
-        panel.padding(Insets.of(14));
-        panel.gap(6);
-
-        panel.child(UIComponents.label(Component.literal("Better Villagers — LLM Settings"))
-                .color(Color.ofRgb(0xFFFFFF)));
+        root.child(UIComponents.label(Component.literal("Better Villagers — LLM Settings"))
+                .color(Color.ofRgb(0xFFFFFF))
+                .margins(Insets.bottom(6)));
 
         this.statusLabel = UIComponents.label(Component.literal("Status: ..."));
-        panel.child(this.statusLabel);
-        this.statsLabel = UIComponents.label(Component.literal(""));
-        this.statsLabel.color(Color.ofRgb(COLOR_DIM));
-        panel.child(this.statsLabel);
+        root.child(this.statusLabel);
+        this.statsLabel = label("");
+        root.child(this.statsLabel);
+        this.activeModelLabel = label("Active model: " + activeModelName(config));
+        this.activeModelLabel.color(Color.ofRgb(COLOR_ACCENT));
+        root.child(this.activeModelLabel.margins(Insets.bottom(10)));
 
-        var scroll = UIContainers.verticalScroll(Sizing.fill(100), Sizing.fill(100), buildForm(config));
-        panel.child(scroll);
+        var scroll = UIContainers.verticalScroll(Sizing.fill(85), Sizing.fill(65), buildForm());
+        scroll.padding(Insets.of(6));
+        scroll.surface(Surface.flat(0x40000000).and(Surface.outline(0xFF303236)));
+        root.child(scroll);
 
-        FlowLayout buttons = UIContainers.horizontalFlow(Sizing.fill(100), Sizing.content());
+        FlowLayout buttons = UIContainers.horizontalFlow(Sizing.content(), Sizing.content());
         buttons.gap(8);
-        buttons.child(UIComponents.button(Component.literal("Save"), b -> saveConfig()));
+        buttons.margins(Insets.top(10));
+        buttons.child(UIComponents.button(Component.literal("Save Settings"), b -> saveConfig()));
         buttons.child(UIComponents.button(Component.literal("Save & Restart LLM"), b -> {
             saveConfig();
             LlamaServerProcess.instance().restart();
         }));
         buttons.child(UIComponents.button(Component.literal("Done"), b ->
-                this.minecraft.setScreen(this.parent)));
-        panel.child(buttons);
+                this.minecraft.setScreenAndShow(this.parent)));
+        root.child(buttons);
 
-        root.child(panel);
+        refreshInstalledModels();
     }
 
-    private FlowLayout buildForm(ModConfig config) {
+    private FlowLayout buildForm() {
+        ModConfig config = ModConfig.get();
         FlowLayout form = UIContainers.verticalFlow(Sizing.fill(100), Sizing.content());
-        form.gap(8);
+        form.gap(10);
 
-        form.child(label("Model URL (or set a local file path in Model Path below)"));
-        this.modelUrlBox = UIComponents.textBox(Sizing.fill(100), config.modelDownloadUrl);
-        this.modelUrlBox.setMaxLength(2000);
-        form.child(this.modelUrlBox);
+        // --- Hugging Face browser ---
+        form.child(sectionTitle("Browse Hugging Face"));
+        FlowLayout searchRow = UIContainers.horizontalFlow(Sizing.fill(100), Sizing.content());
+        searchRow.gap(6);
+        this.searchBox = UIComponents.textBox(Sizing.fill(75), "");
+        this.searchBox.setMaxLength(200);
+        searchRow.child(this.searchBox);
+        searchRow.child(UIComponents.button(Component.literal("Search"), b -> runSearch()));
+        form.child(searchRow);
+
+        this.searchResults = UIContainers.verticalFlow(Sizing.fill(100), Sizing.content());
+        this.searchResults.gap(3);
+        form.child(this.searchResults);
+
+        this.filesForSelectedRepo = UIContainers.verticalFlow(Sizing.fill(100), Sizing.content());
+        this.filesForSelectedRepo.gap(3);
+        form.child(this.filesForSelectedRepo);
 
         this.downloadLabel = label("");
         form.child(this.downloadLabel);
-        this.downloadButton = UIComponents.button(Component.literal("Download model"), b -> startDownload());
-        form.child(this.downloadButton);
 
+        // --- Installed models ---
+        form.child(sectionTitle("Installed Models").margins(Insets.top(10)));
+        this.installedModels = UIContainers.verticalFlow(Sizing.fill(100), Sizing.content());
+        this.installedModels.gap(3);
+        form.child(this.installedModels);
+
+        // --- Advanced settings ---
+        form.child(sectionTitle("Advanced").margins(Insets.top(10)));
         form.child(row("GPU layers (999 = full offload, 0 = CPU-only)",
                 this.gpuLayersBox = UIComponents.textBox(Sizing.fixed(80), String.valueOf(config.gpuLayers))));
         form.child(row("Context size",
@@ -122,10 +162,14 @@ public class ModSettingsScreen extends BaseOwoScreen<FlowLayout> {
         return form;
     }
 
+    private LabelComponent sectionTitle(String text) {
+        return UIComponents.label(Component.literal(text)).color(Color.ofRgb(0xFFFFFF));
+    }
+
     private FlowLayout row(String labelText, TextBoxComponent box) {
         FlowLayout row = UIContainers.horizontalFlow(Sizing.fill(100), Sizing.content());
         row.gap(8);
-        row.verticalAlignment(io.wispforest.owo.ui.core.VerticalAlignment.CENTER);
+        row.verticalAlignment(VerticalAlignment.CENTER);
         row.child(label(labelText).horizontalSizing(Sizing.fill(70)));
         row.child(box);
         return row;
@@ -135,21 +179,186 @@ public class ModSettingsScreen extends BaseOwoScreen<FlowLayout> {
         return UIComponents.label(Component.literal(text)).color(Color.ofRgb(COLOR_TEXT));
     }
 
-    private void startDownload() {
+    // --- Hugging Face search ---
+
+    private void runSearch() {
+        String query = this.searchBox.getValue().trim();
+        if (query.isEmpty()) {
+            return;
+        }
+        this.searchResults.clearChildren();
+        this.searchResults.child(label("Searching..."));
+
+        CompletableFuture.supplyAsync(() -> {
+            try {
+                return HuggingFaceSearch.search(query);
+            } catch (Exception e) {
+                return List.<HuggingFaceSearch.ModelResult>of();
+            }
+        }).thenAccept(results -> this.minecraft.execute(() -> showSearchResults(results)));
+    }
+
+    private void showSearchResults(List<HuggingFaceSearch.ModelResult> results) {
+        this.searchResults.clearChildren();
+        this.filesForSelectedRepo.clearChildren();
+        if (results.isEmpty()) {
+            this.searchResults.child(label("No results (or search failed)."));
+            return;
+        }
+        for (HuggingFaceSearch.ModelResult result : results) {
+            ButtonComponent button = UIComponents.button(
+                    Component.literal(result.repoId() + "  (" + formatCount(result.downloads()) + " downloads)"),
+                    b -> selectRepo(result.repoId()));
+            button.horizontalSizing(Sizing.fill(100));
+            this.searchResults.child(button);
+        }
+    }
+
+    private void selectRepo(String repoId) {
+        this.filesForSelectedRepo.clearChildren();
+        this.filesForSelectedRepo.child(label("Loading files for " + repoId + "..."));
+
+        CompletableFuture.supplyAsync(() -> {
+            try {
+                return HuggingFaceSearch.listGgufFiles(repoId);
+            } catch (Exception e) {
+                return List.<HuggingFaceSearch.ModelFile>of();
+            }
+        }).thenAccept(files -> this.minecraft.execute(() -> showFiles(repoId, files)));
+    }
+
+    private void showFiles(String repoId, List<HuggingFaceSearch.ModelFile> files) {
+        this.filesForSelectedRepo.clearChildren();
+        if (files.isEmpty()) {
+            this.filesForSelectedRepo.child(label("No .gguf files found in " + repoId + "."));
+            return;
+        }
+        for (HuggingFaceSearch.ModelFile file : files) {
+            ButtonComponent button = UIComponents.button(Component.literal(file.fileName()),
+                    b -> startDownload(file.downloadUrl()));
+            button.horizontalSizing(Sizing.fill(100));
+            this.filesForSelectedRepo.child(button);
+        }
+    }
+
+    private void startDownload(String url) {
         if (ModelDownloadState.status() == ModelDownloadState.Status.DOWNLOADING) {
             return;
         }
-        String url = this.modelUrlBox.getValue().trim();
-        this.downloadButton.active(false);
+        ModConfig config = ModConfig.get();
+        config.modelDownloadUrl = url;
+        config.modelPath = "";
+        config.save();
+
         CompletableFuture.runAsync(() -> {
             try {
-                java.nio.file.Path modelsDir = FabricLoader.getInstance().getGameDir().resolve("bettervillagers/models");
+                Path modelsDir = FabricLoader.getInstance().getGameDir().resolve("bettervillagers/models");
                 ModelAssets.resolve(modelsDir, url);
             } catch (Exception ignored) {
                 // status already recorded in ModelDownloadState
+            } finally {
+                this.minecraft.execute(this::refreshInstalledModels);
             }
         });
     }
+
+    // --- Installed models ---
+
+    private void refreshInstalledModels() {
+        this.installedModels.clearChildren();
+        Path modelsDir = FabricLoader.getInstance().getGameDir().resolve("bettervillagers/models");
+        List<Path> files;
+        try (Stream<Path> stream = Files.exists(modelsDir) ? Files.list(modelsDir) : Stream.empty()) {
+            files = stream.filter(p -> p.toString().endsWith(".gguf"))
+                    .sorted(Comparator.comparing(p -> p.getFileName().toString()))
+                    .toList();
+        } catch (IOException e) {
+            files = List.of();
+        }
+
+        if (files.isEmpty()) {
+            this.installedModels.child(label("No models downloaded yet."));
+            return;
+        }
+
+        ModConfig config = ModConfig.get();
+        for (Path file : files) {
+            boolean active = file.toAbsolutePath().toString().equals(activeModelPathOf(config));
+            FlowLayout row = UIContainers.horizontalFlow(Sizing.fill(100), Sizing.content());
+            row.gap(6);
+            row.verticalAlignment(VerticalAlignment.CENTER);
+
+            long sizeMb = fileSizeMb(file);
+            String name = file.getFileName().toString() + " (" + sizeMb + " MB)" + (active ? "  ← active" : "");
+            row.child(label(name).horizontalSizing(Sizing.fill(70)));
+
+            ButtonComponent useButton = UIComponents.button(Component.literal("Use"), b -> useLocalModel(file));
+            useButton.active(!active);
+            row.child(useButton);
+
+            row.child(UIComponents.button(Component.literal("Delete"), b -> deleteModel(file)));
+
+            this.installedModels.child(row);
+        }
+    }
+
+    private void useLocalModel(Path file) {
+        ModConfig config = ModConfig.get();
+        config.modelPath = file.toAbsolutePath().toString();
+        config.save();
+        this.activeModelLabel.text(Component.literal("Active model: " + activeModelName(config)));
+        refreshInstalledModels();
+    }
+
+    private void deleteModel(Path file) {
+        try {
+            Files.deleteIfExists(file);
+        } catch (IOException ignored) {
+            // best-effort
+        }
+        refreshInstalledModels();
+    }
+
+    private static String activeModelPathOf(ModConfig config) {
+        if (!config.modelPath.isBlank()) {
+            return Path.of(config.modelPath).toAbsolutePath().toString();
+        }
+        Path modelsDir = FabricLoader.getInstance().getGameDir().resolve("bettervillagers/models");
+        return modelsDir.resolve(fileNameFromUrl(config.modelDownloadUrl)).toAbsolutePath().toString();
+    }
+
+    private static String activeModelName(ModConfig config) {
+        if (!config.modelPath.isBlank()) {
+            return Path.of(config.modelPath).getFileName().toString();
+        }
+        return fileNameFromUrl(config.modelDownloadUrl);
+    }
+
+    private static String fileNameFromUrl(String url) {
+        String path = url;
+        int idx = path.lastIndexOf('/');
+        return idx >= 0 ? path.substring(idx + 1) : path;
+    }
+
+    private static long fileSizeMb(Path file) {
+        try {
+            return Files.size(file) / 1_048_576;
+        } catch (IOException e) {
+            return 0;
+        }
+    }
+
+    private static String formatCount(long n) {
+        if (n >= 1_000_000) {
+            return String.format("%.1fM", n / 1_000_000.0);
+        }
+        if (n >= 1_000) {
+            return String.format("%.1fK", n / 1_000.0);
+        }
+        return String.valueOf(n);
+    }
+
+    // --- Live status / progress ---
 
     @Override
     public void tick() {
@@ -168,6 +377,7 @@ public class ModSettingsScreen extends BaseOwoScreen<FlowLayout> {
                 ? String.format("Last: %.1f tok/s  •  Average: %.1f tok/s", llm.lastTokensPerSecond(), llm.averageTokensPerSecond())
                 : "No completions yet this session";
         this.statsLabel.text(Component.literal(stats));
+        this.statsLabel.color(Color.ofRgb(COLOR_DIM));
 
         ModelDownloadState.Status downloadStatus = ModelDownloadState.status();
         switch (downloadStatus) {
@@ -186,20 +396,18 @@ public class ModSettingsScreen extends BaseOwoScreen<FlowLayout> {
             case DONE -> {
                 this.downloadLabel.text(Component.literal("Download complete."));
                 this.downloadLabel.color(Color.ofRgb(COLOR_READY));
-                this.downloadButton.active(true);
             }
             case ERROR -> {
                 this.downloadLabel.text(Component.literal("Download failed: " + ModelDownloadState.errorMessage()));
                 this.downloadLabel.color(Color.ofRgb(COLOR_ERROR));
-                this.downloadButton.active(true);
             }
-            case IDLE -> this.downloadButton.active(true);
+            case IDLE -> {
+            }
         }
     }
 
     private void saveConfig() {
         ModConfig config = ModConfig.get();
-        config.modelDownloadUrl = this.modelUrlBox.getValue().trim();
         config.gpuLayers = parseIntOr(this.gpuLayersBox.getValue(), config.gpuLayers);
         config.contextSize = parseIntOr(this.contextSizeBox.getValue(), config.contextSize);
         config.threads = parseIntOr(this.threadsBox.getValue(), config.threads);

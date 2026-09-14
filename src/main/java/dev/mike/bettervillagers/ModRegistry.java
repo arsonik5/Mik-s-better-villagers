@@ -59,8 +59,11 @@ public final class ModRegistry {
 
         LlamaServerProcess llm = LlamaServerProcess.instance();
         if (llm.state() != LlamaServerProcess.State.READY) {
-            ServerPlayNetworking.send(player, new VillagerChatS2C(villagerEntityId,
-                    "(" + villager.getDisplayName().getString() + " doesn't seem to be listening right now.)"));
+            String name = villager.getDisplayName().getString();
+            String status = llm.state() == LlamaServerProcess.State.STARTING
+                    ? "(" + name + " is still gathering their thoughts — try again in a few seconds.)"
+                    : "(" + name + " doesn't seem to be listening right now.)";
+            ServerPlayNetworking.send(player, new VillagerChatS2C(villagerEntityId, status));
             return;
         }
 

@@ -32,7 +32,7 @@ public final class ModConfig {
      * this file directly rather than requiring hand-editing.
      */
     public String modelDownloadUrl =
-            "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf";
+            "https://huggingface.co/lmstudio-community/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf";
     /** Empty = auto-resolve/download the bundled llama-server binary. */
     public String llamaServerPath = "";
     /** 999 offloads everything to the GPU; set to 0 to force CPU-only. */

@@ -39,11 +39,17 @@ dependencies {
     // Fabric API. This is technically optional, but you probably want it anyway.
     implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
 
-    // owo-lib: declarative UI framework used for the villager talk/trade screen.
+    // owo-lib: declarative UI framework the whole mod's GUI is built on.
+    // Bundled (include) so players don't need to separately install it —
+    // "download the mod, it just works" means it has to ship inside our jar.
     implementation "io.wispforest:owo-lib:${project.owo_version}"
+    include "io.wispforest:owo-lib:${project.owo_version}"
 
-    // ModMenu: gives the mod a real settings screen from the Mods list.
-    implementation "com.terraformersmc:modmenu:${project.modmenu_version}"
+    // ModMenu: gives the mod a real settings screen IF the player already
+    // has ModMenu installed (very common). Compile-time only, never
+    // bundled and never a hard dependency — the mod must work fully
+    // without it (see fabric.mod.json: not listed under "depends").
+    compileOnly "com.terraformersmc:modmenu:${project.modmenu_version}"
 }
 
 java {
