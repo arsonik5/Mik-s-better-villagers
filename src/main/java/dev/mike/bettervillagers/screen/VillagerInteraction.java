@@ -14,6 +14,12 @@ public final class VillagerInteraction {
 
     public static void open(ServerPlayer player, Villager villager) {
         villager.setTradingPlayer(player);
+        int villagerEntityId = villager.getId();
+
+        // Deliberately never sends villager.getOffers() here: vanilla's
+        // auto-generated trades are off. Real offers only ever come from a
+        // negotiated conversation (see the trade-generation work in Phase 4),
+        // pushed via VillagerOffersS2C once that exists.
         player.openMenu(new ExtendedMenuProvider<Integer>() {
             @Override
             public Component getDisplayName() {
@@ -22,12 +28,12 @@ public final class VillagerInteraction {
 
             @Override
             public AbstractContainerMenu createMenu(int syncId, Inventory inventory, Player player) {
-                return new VillagerTalkMenu(syncId, inventory, villager);
+                return new VillagerTalkMenu(syncId, inventory, villagerEntityId);
             }
 
             @Override
             public Integer getScreenOpeningData(ServerPlayer serverPlayer) {
-                return villager.getId();
+                return villagerEntityId;
             }
         });
     }
