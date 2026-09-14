@@ -119,8 +119,16 @@ public class ModSettingsScreen extends BaseOwoScreen<FlowLayout> {
         FlowLayout form = UIContainers.verticalFlow(Sizing.fill(100), Sizing.content());
         form.gap(10);
 
+        // --- Installed models (first/most prominent — this is the actual manager) ---
+        form.child(sectionTitle("Installed Models"));
+        form.child(label("The model in use right now is marked ← active. Click Use to switch, Delete to remove.")
+                .color(Color.ofRgb(COLOR_DIM)));
+        this.installedModels = UIContainers.verticalFlow(Sizing.fill(100), Sizing.content());
+        this.installedModels.gap(3);
+        form.child(this.installedModels);
+
         // --- Hugging Face browser ---
-        form.child(sectionTitle("Browse Hugging Face"));
+        form.child(sectionTitle("Download a New Model from Hugging Face").margins(Insets.top(10)));
         FlowLayout searchRow = UIContainers.horizontalFlow(Sizing.fill(100), Sizing.content());
         searchRow.gap(6);
         this.searchBox = UIComponents.textBox(Sizing.fill(75), "");
@@ -131,6 +139,8 @@ public class ModSettingsScreen extends BaseOwoScreen<FlowLayout> {
 
         this.searchResults = UIContainers.verticalFlow(Sizing.fill(100), Sizing.content());
         this.searchResults.gap(3);
+        this.searchResults.child(label("Type a model name above and press Search (e.g. \"gemma\", \"phi\", \"qwen\").")
+                .color(Color.ofRgb(COLOR_DIM)));
         form.child(this.searchResults);
 
         this.filesForSelectedRepo = UIContainers.verticalFlow(Sizing.fill(100), Sizing.content());
@@ -139,12 +149,6 @@ public class ModSettingsScreen extends BaseOwoScreen<FlowLayout> {
 
         this.downloadLabel = label("");
         form.child(this.downloadLabel);
-
-        // --- Installed models ---
-        form.child(sectionTitle("Installed Models").margins(Insets.top(10)));
-        this.installedModels = UIContainers.verticalFlow(Sizing.fill(100), Sizing.content());
-        this.installedModels.gap(3);
-        form.child(this.installedModels);
 
         // --- Advanced settings ---
         form.child(sectionTitle("Advanced").margins(Insets.top(10)));
@@ -193,16 +197,24 @@ public class ModSettingsScreen extends BaseOwoScreen<FlowLayout> {
             try {
                 return HuggingFaceSearch.search(query);
             } catch (Exception e) {
-                return List.<HuggingFaceSearch.ModelResult>of();
+                throw new java.util.concurrent.CompletionException(e);
             }
-        }).thenAccept(results -> this.minecraft.execute(() -> showSearchResults(results)));
+        }).whenComplete((results, error) -> this.minecraft.execute(() -> {
+                    if (error != null) {
+                        logSearchError(error);
+                        this.searchResults.clearChildren();
+                        this.searchResults.child(label("Search failed: " + rootMessage(error)).color(Color.ofRgb(COLOR_ERROR)));
+                    } else {
+                        showSearchResults(results);
+                    }
+                }));
     }
 
     private void showSearchResults(List<HuggingFaceSearch.ModelResult> results) {
         this.searchResults.clearChildren();
         this.filesForSelectedRepo.clearChildren();
         if (results.isEmpty()) {
-            this.searchResults.child(label("No results (or search failed)."));
+            this.searchResults.child(label("No results for that search."));
             return;
         }
         for (HuggingFaceSearch.ModelResult result : results) {
@@ -222,9 +234,30 @@ public class ModSettingsScreen extends BaseOwoScreen<FlowLayout> {
             try {
                 return HuggingFaceSearch.listGgufFiles(repoId);
             } catch (Exception e) {
-                return List.<HuggingFaceSearch.ModelFile>of();
+                throw new java.util.concurrent.CompletionException(e);
             }
-        }).thenAccept(files -> this.minecraft.execute(() -> showFiles(repoId, files)));
+        }).whenComplete((files, error) -> this.minecraft.execute(() -> {
+                    if (error != null) {
+                        logSearchError(error);
+                        this.filesForSelectedRepo.clearChildren();
+                        this.filesForSelectedRepo.child(label("Could not list files: " + rootMessage(error)).color(Color.ofRgb(COLOR_ERROR)));
+                    } else {
+                        showFiles(repoId, files);
+                    }
+                }));
+    }
+
+    private static void logSearchError(Throwable error) {
+        dev.mike.bettervillagers.BetterVillagers.LOGGER.warn("Hugging Face request failed", error);
+    }
+
+    private static String rootMessage(Throwable error) {
+        Throwable cause = error;
+        while (cause.getCause() != null) {
+            cause = cause.getCause();
+        }
+        String msg = cause.getMessage();
+        return msg == null ? cause.getClass().getSimpleName() : msg;
     }
 
     private void showFiles(String repoId, List<HuggingFaceSearch.ModelFile> files) {

@@ -51,21 +51,45 @@ public final class ModelAssets {
         return target;
     }
 
+    /**
+     * Resumable: a model download is 1-3GB and routinely won't finish in one
+     * sitting (game closed, crash, an earlier dev-test cycle killing the
+     * process) — previously every interrupted attempt threw away all
+     * progress and restarted from byte 0 every time. Now: if a `.part` file
+     * already has bytes, request a Range starting there and append instead
+     * of truncating; if the server doesn't honor the range (no 206), fall
+     * back to a normal full restart.
+     */
     private static void downloadWithProgress(String url, Path dest) throws IOException {
         HttpClient client = HttpClient.newBuilder().followRedirects(HttpClient.Redirect.ALWAYS).build();
-        HttpRequest request = HttpRequest.newBuilder(URI.create(url)).GET().build();
+
+        long existingBytes = Files.exists(dest) ? Files.size(dest) : 0;
+        HttpRequest.Builder requestBuilder = HttpRequest.newBuilder(URI.create(url)).GET();
+        if (existingBytes > 0) {
+            requestBuilder.header("Range", "bytes=" + existingBytes + "-");
+        }
+
         try {
-            HttpResponse<InputStream> response = client.send(request, HttpResponse.BodyHandlers.ofInputStream());
-            if (response.statusCode() / 100 != 2) {
-                throw new IOException("Download failed (" + response.statusCode() + ")");
+            HttpResponse<InputStream> response = client.send(requestBuilder.build(), HttpResponse.BodyHandlers.ofInputStream());
+            int status = response.statusCode();
+            if (status != 200 && status != 206) {
+                throw new IOException("Download failed (" + status + ")");
             }
-            long total = response.headers().firstValueAsLong("Content-Length").orElse(-1);
-            ModelDownloadState.progress(0, total);
+
+            boolean resuming = status == 206;
+            long startAt = resuming ? existingBytes : 0;
+            long remaining = response.headers().firstValueAsLong("Content-Length").orElse(-1);
+            long total = resuming && remaining > 0 ? remaining + existingBytes : remaining;
+            ModelDownloadState.progress(startAt, total);
+
+            StandardOpenOption[] openOptions = resuming
+                    ? new StandardOpenOption[]{StandardOpenOption.CREATE, StandardOpenOption.APPEND}
+                    : new StandardOpenOption[]{StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING};
 
             try (InputStream in = response.body();
-                 OutputStream out = Files.newOutputStream(dest, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+                 OutputStream out = Files.newOutputStream(dest, openOptions)) {
                 byte[] buf = new byte[1 << 16];
-                long downloaded = 0;
+                long downloaded = startAt;
                 int read;
                 while ((read = in.read(buf)) != -1) {
                     out.write(buf, 0, read);

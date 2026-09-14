@@ -9,11 +9,14 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import net.fabricmc.loader.api.FabricLoader;
@@ -39,6 +42,8 @@ public final class LlamaServerProcess {
     private volatile double lastTokensPerSecond = -1;
     private volatile double averageTokensPerSecond = -1;
     private int tokensPerSecondSamples = 0;
+
+    private final AtomicBoolean shutdownHookRegistered = new AtomicBoolean(false);
 
     private LlamaServerProcess() {
     }
@@ -96,6 +101,19 @@ public final class LlamaServerProcess {
         try {
             ModConfig config = ModConfig.get();
             Path root = FabricLoader.getInstance().getGameDir().resolve("bettervillagers");
+            Files.createDirectories(root);
+            Path pidFile = root.resolve("llama-server.pid");
+
+            // A previous session's llama-server can be left running if the
+            // JVM was killed hard enough that our shutdown hook never ran
+            // (e.g. a forceful process kill, or a crash) — GPU memory stays
+            // pinned by an orphan nobody's talking to. Clean that up before
+            // starting a new one, every launch.
+            killStaleProcess(pidFile);
+
+            if (this.shutdownHookRegistered.compareAndSet(false, true)) {
+                Runtime.getRuntime().addShutdownHook(new Thread(this::stop, "bv-llama-shutdown"));
+            }
 
             Path exe = config.llamaServerPath.isBlank()
                     ? NativeAssets.resolve(root.resolve("bin"))
@@ -119,11 +137,12 @@ public final class LlamaServerProcess {
                     "--no-webui"
             );
 
-            BetterVillagers.LOGGER.info("Starting llama-server on port {}", port);
+            BetterVillagers.LOGGER.info("Starting llama-server on port {} with model {}", port, model.getFileName());
             ProcessBuilder pb = new ProcessBuilder(command)
                     .directory(exe.getParent().toFile())
                     .redirectErrorStream(true);
             this.process = pb.start();
+            writePidFile(pidFile, this.process.pid());
 
             Thread logDrain = new Thread(this::drainLog, "bv-llama-log");
             logDrain.setDaemon(true);
@@ -133,6 +152,41 @@ public final class LlamaServerProcess {
         } catch (IOException e) {
             BetterVillagers.LOGGER.warn("Failed to start local LLM server", e);
             state.set(State.DEGRADED);
+        }
+    }
+
+    private static void killStaleProcess(Path pidFile) {
+        if (!Files.exists(pidFile)) {
+            return;
+        }
+        try {
+            long pid = Long.parseLong(Files.readString(pidFile).trim());
+            Optional<ProcessHandle> handle = ProcessHandle.of(pid);
+            if (handle.isPresent() && handle.get().isAlive()
+                    && handle.get().info().command().map(cmd -> cmd.toLowerCase().contains("llama-server")).orElse(false)) {
+                BetterVillagers.LOGGER.info("Found a stale llama-server (pid {}) from a previous session, stopping it", pid);
+                handle.get().destroy();
+                handle.get().onExit().orTimeout(5, TimeUnit.SECONDS).exceptionally(ex -> {
+                    handle.get().destroyForcibly();
+                    return null;
+                }).join();
+            }
+        } catch (Exception e) {
+            BetterVillagers.LOGGER.debug("Could not check/stop stale llama-server pid file", e);
+        } finally {
+            try {
+                Files.deleteIfExists(pidFile);
+            } catch (IOException ignored) {
+                // best-effort
+            }
+        }
+    }
+
+    private static void writePidFile(Path pidFile, long pid) {
+        try {
+            Files.writeString(pidFile, String.valueOf(pid));
+        } catch (IOException e) {
+            BetterVillagers.LOGGER.debug("Could not write llama-server pid file", e);
         }
     }
 
@@ -205,5 +259,12 @@ public final class LlamaServerProcess {
             Thread.currentThread().interrupt();
         }
         this.process = null;
+
+        try {
+            Path pidFile = FabricLoader.getInstance().getGameDir().resolve("bettervillagers/llama-server.pid");
+            Files.deleteIfExists(pidFile);
+        } catch (Exception ignored) {
+            // best-effort
+        }
     }
 }
