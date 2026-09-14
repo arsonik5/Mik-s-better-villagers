@@ -2,6 +2,22 @@
 
 Things discovered the hard way this session, kept here so nobody re-derives (or re-breaks) them.
 
+## Orphaned `llama-server.exe` processes pile up across restarts
+
+A forceful kill of the Java process (crash, `taskkill /F`, `Stop-Process -Force` — anything that doesn't let the JVM run its normal shutdown path) never reaches `LlamaServerProcess.stop()`, so the child `llama-server` subprocess is orphaned and keeps running indefinitely, holding GPU memory. This isn't a hypothetical: repeated dev-test relaunches during this session left **5 orphaned `llama-server.exe` processes** running simultaneously (confirmed via `tasklist`), each holding 1-3.5GB, and was the actual root cause behind "LLM stuck on STARTING" and "same download shows every launch" bug reports — the *real* server the mod just launched was starved of GPU memory by its own zombie predecessors.
+
+**Fix**: `LlamaServerProcess` now writes its child's PID to `<gameDir>/bettervillagers/llama-server.pid` on launch, and on the *next* launch checks that file first — if a process with that PID is still alive and its command line mentions `llama-server`, it's killed before a new one starts. A JVM shutdown hook is also registered as a backstop for graceful exits (window close, `Ctrl+C`), though note a `-Force`-style kill bypasses shutdown hooks entirely on Windows — the PID-file check on next launch is the mechanism that actually matters here.
+
+**Verified end-to-end**, not just by reasoning about it: ran the mod headlessly via `./gradlew runServer` (no GUI clicking needed — `ServerLifecycleEvents.SERVER_STARTING` fires on dedicated-server boot same as singleplayer world load), confirmed `LlamaServerProcess` reached `READY` normally, force-killed the parent `java.exe`, confirmed via `tasklist` the `llama-server.exe` orphan survived, relaunched, and confirmed both the log line `"Found a stale llama-server (pid ...) from a previous session, stopping it"` and `tasklist` showing exactly one `llama-server.exe` afterward.
+
+`./gradlew runServer` (needs `run/eula.txt` containing `eula=true`, gitignored — a real dev-testing convenience) is generally the fastest way to exercise server-side-only logic (anything gated on `ServerLifecycleEvents`) without touching the client GUI at all.
+
+## Downloads must be resumable, not just retryable
+
+`ModelAssets` originally opened its destination file with `TRUNCATE_EXISTING` unconditionally, so any interrupted download (closing the game, a crash, or — during dev testing — relaunching the client, which happens *constantly*) threw away all progress and restarted from byte 0 next time. For a 1-3GB model file this effectively means the download never finishes under normal dev-test cadence, and looks exactly like "it's stuck downloading" to a real player who just closes the game once mid-download.
+
+**Fix**: check existing `.part` file size first; if non-zero, send `Range: bytes=<existing>-` and append instead of truncating; fall back to a full restart only if the server doesn't honor the range (no `206` response). **Verified** (not assumed) that Hugging Face's CDN honors `Range` requests through its redirect chain, and that `java.net.http.HttpClient` correctly forwards the `Range` header across `HttpClient.Redirect.ALWAYS` redirects — both confirmed with a real request against the actual model URL this mod downloads by default, getting back `206 Partial Content` with a correct `Content-Range` and exact expected body length.
+
 ## Minecraft moved to year-based version numbers
 
 As of mid-2026, Mojang's launcher displays releases as `26.1`, `26.2`, etc. instead of `1.21.x`. The old `1.21.x` numbering still exists as an internal jar/mapping version for a while (e.g. `1.21.11` ≈ the same build as `26.1`), but the current Fabric tooling (Loom, fabric-api, the official `fabric-example-mod` template) has already switched to addressing Minecraft directly by the year-based number (`minecraft_version=26.2`), and that's what `gradle.properties` uses here. Don't "fix" this back to a `1.21.x` string — check `https://meta.fabricmc.net/v2/versions/game` or the live `FabricMC/fabric-example-mod` repo if a future Minecraft update means this needs revisiting.
