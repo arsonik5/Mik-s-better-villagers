@@ -147,11 +147,19 @@ public class VillagerTalkScreen extends BaseOwoContainerScreen<FlowLayout, Villa
 
         this.dialogueBar.margins(Insets.bottom(24));
         root.child(this.dialogueBar);
+    }
 
+    @Override
+    protected void init() {
+        super.init();
         // Auto-focus the chat box so typing works immediately without
         // clicking into it first. owo tracks focus through its own
-        // FocusHandler, not vanilla's Screen-level focus.
-        root.focusHandler().focus(this.chatInput, UIComponent.FocusSource.KEYBOARD_CYCLE);
+        // FocusHandler, not vanilla's Screen-level focus — and that handler
+        // isn't initialized until after inflateAndMount() runs inside
+        // super.init(), so this can't happen at the end of build().
+        if (this.uiAdapter != null && this.uiAdapter.rootComponent.focusHandler() != null) {
+            this.uiAdapter.rootComponent.focusHandler().focus(this.chatInput, UIComponent.FocusSource.KEYBOARD_CYCLE);
+        }
     }
 
     private void submitChatMessage() {
