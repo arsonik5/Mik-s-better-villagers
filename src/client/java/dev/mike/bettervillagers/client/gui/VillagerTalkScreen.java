@@ -15,6 +15,7 @@ import io.wispforest.owo.ui.core.Insets;
 import io.wispforest.owo.ui.core.OwoUIAdapter;
 import io.wispforest.owo.ui.core.Sizing;
 import io.wispforest.owo.ui.core.Surface;
+import io.wispforest.owo.ui.core.UIComponent;
 import io.wispforest.owo.ui.core.VerticalAlignment;
 
 import net.fabricmc.fabric.api.client.networking.v1.ClientPlayNetworking;
@@ -39,7 +40,9 @@ public class VillagerTalkScreen extends BaseOwoContainerScreen<FlowLayout, Villa
     private static final int GLFW_KEY_ENTER = 257;
     private static final int GLFW_KEY_ESCAPE = 256;
     private static final int MAX_MESSAGE_LENGTH = 2000;
-    private static final int LINES_HEIGHT = 150;
+    private static final int LINES_HEIGHT = 70;
+    private static final float BAR_WIDTH_FRACTION = 0.42f;
+    private static final int BAR_PADDING = 14;
 
     private static final int COLOR_NAME = 0xFFFFFFFF;
     private static final int COLOR_LINE_LATEST = 0xFFE0E0E0;
@@ -111,9 +114,9 @@ public class VillagerTalkScreen extends BaseOwoContainerScreen<FlowLayout, Villa
         root.horizontalAlignment(HorizontalAlignment.CENTER);
         root.verticalAlignment(VerticalAlignment.BOTTOM);
 
-        this.dialogueBar = UIContainers.verticalFlow(Sizing.fill(42), Sizing.content());
-        this.dialogueBar.surface(Surface.blur(4, 8).and(Surface.flat(COLOR_BACKDROP)));
-        this.dialogueBar.padding(Insets.of(14));
+        this.dialogueBar = UIContainers.verticalFlow(Sizing.fill((int) (BAR_WIDTH_FRACTION * 100)), Sizing.content());
+        this.dialogueBar.surface(Surface.blur(2, 4).and(Surface.flat(COLOR_BACKDROP)));
+        this.dialogueBar.padding(Insets.of(BAR_PADDING));
         this.dialogueBar.gap(2);
 
         this.dialogueBar.child(UIComponents.label(this.title).color(Color.ofRgb(COLOR_NAME)));
@@ -144,6 +147,11 @@ public class VillagerTalkScreen extends BaseOwoContainerScreen<FlowLayout, Villa
 
         this.dialogueBar.margins(Insets.bottom(24));
         root.child(this.dialogueBar);
+
+        // Auto-focus the chat box so typing works immediately without
+        // clicking into it first. owo tracks focus through its own
+        // FocusHandler, not vanilla's Screen-level focus.
+        root.focusHandler().focus(this.chatInput, UIComponent.FocusSource.KEYBOARD_CYCLE);
     }
 
     private void submitChatMessage() {
@@ -171,6 +179,11 @@ public class VillagerTalkScreen extends BaseOwoContainerScreen<FlowLayout, Villa
 
     private void rebuildLines() {
         this.lines.clearChildren();
+        // Wrap to the bar's actual current width, not a guessed constant —
+        // this.width changes with the window/GUI scale, the bar is a fixed
+        // fraction of it.
+        int wrapWidth = Math.max(60, (int) (this.width * BAR_WIDTH_FRACTION) - BAR_PADDING * 2 - 4);
+
         List<ClientChatHistoryStore.Entry> snapshot = new ArrayList<>(this.chatEntries);
         for (int i = 0; i < snapshot.size(); i++) {
             ClientChatHistoryStore.Entry entry = snapshot.get(i);
@@ -179,7 +192,7 @@ public class VillagerTalkScreen extends BaseOwoContainerScreen<FlowLayout, Villa
             String prefix = entry.fromPlayer() ? "You: " : "";
             this.lines.child(UIComponents.label(Component.literal(prefix + entry.text()))
                     .color(Color.ofRgb(color))
-                    .maxWidth(400));
+                    .maxWidth(wrapWidth));
         }
         if (this.linesScroll != null) {
             this.linesScroll.scrollTo(1.0);
